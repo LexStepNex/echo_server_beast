@@ -2,6 +2,8 @@
 // Асинхронный Echo Server на Boost.Asio
 
 #include <boost/asio.hpp>
+#include <boost/asio/steady_timer.hpp>
+
 #include <iostream>
 #include <memory>
 #include <ctime>
@@ -10,19 +12,63 @@
 
 using boost::asio::ip::tcp;
 
-//Сессия один клиент
+//Сессия для одного клиента
 class Session : public std::enable_shared_from_this<Session> {
 public:
-    Session(tcp::socket socket) : socket_(std::move(socket)), data_(max_length, '\0') {
+    Session(tcp::socket socket)
+        : socket_(std::move(socket)),
+          data_(max_length, '\0'),
+          timer_(socket_.get_executor()) {
     }
 
     void start() {
         auto endpoint = socket_.remote_endpoint();
-        std::cout << "Client connected: " << endpoint.address().to_string() << ":" << endpoint.port() << std::endl;
+        std::cout << "Client connected: " << endpoint.address().to_string()
+                << ":" << endpoint.port() << std::endl;
+
+        start_timeout();
         do_read();
     }
 
 private:
+    void start_timeout() {
+        timer_.expires_after(std::chrono::seconds(2));
+        timer_.async_wait(
+            [self = shared_from_this()](boost::system::error_code ec) {
+            if (!ec) {
+                std::cout << "[Session] Client timeout, disconnecting\n";
+                self->send_timeout_and_close();
+            }
+        });
+    }
+
+    void cancel_timeout() {
+        timer_.cancel();
+    }
+
+    void send_timeout_and_close() {
+        auto self = shared_from_this();
+        std::string timeout_msg = "ERROR: Connection timeout\r\n";
+
+        boost::asio::async_write(
+            socket_,
+            boost::asio::buffer(timeout_msg),
+            [self](boost::system::error_code ec, std::size_t /*length*/) {
+                // Завершаем отправку
+                boost::system::error_code shutdown_ec;
+                self->socket_.shutdown(tcp::socket::shutdown_send, shutdown_ec);
+
+                // 🔑 3. Даём сети время на доставку (100 мс достаточно для localhost)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+                // Закрываем окончательно
+                boost::system::error_code close_ec;
+                self->socket_.close(close_ec);
+
+                std::cout << "[Session] Socket closed after timeout message\n";
+            });
+    }
+
     void timeNow() {
         data_.clear();
         time_t now = time(nullptr);
@@ -35,6 +81,7 @@ private:
 
     void do_read() {
         auto self = shared_from_this();
+
         socket_.async_read_some(
             boost::asio::buffer(data_.data(), max_length),
             [this, self](boost::system::error_code ec, std::size_t length) {
@@ -45,6 +92,9 @@ private:
                     while (!data_.empty() && (data_.back() == '\r' || data_.back() == '\n')) {
                         data_.pop_back();
                     }
+
+                    cancel_timeout();
+
                     //Данные получены, отправляем эхо
                     if (data_.starts_with("TIME")) {
                         timeNow();
@@ -71,6 +121,7 @@ private:
 
     void do_write(std::size_t length) {
         auto self = shared_from_this();
+
         boost::asio::async_write(
             socket_,
             boost::asio::buffer(data_.data(), length),
@@ -78,8 +129,11 @@ private:
                 if (!ec) {
                     std::cout << "Sent: " << length << " bytes" << std::endl;
 
+                    cancel_timeout();
                     //Эхо отправлено - ждём следующее сообщение
                     data_.resize(max_length, '\0');
+
+                    start_timeout();
                     do_read();
                 } else {
                     std::cout << "[Session] Write error: " << ec.message() << "\n";
@@ -88,8 +142,9 @@ private:
     }
 
     tcp::socket socket_;
+    boost::asio::steady_timer timer_;
+
     static constexpr std::size_t max_length = 1024;
-    // char data_[max_length];
     std::string data_;
 };
 
