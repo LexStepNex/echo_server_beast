@@ -2,7 +2,10 @@
 // Асинхронный Echo Server на Boost.Asio
 
 #include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/asio/steady_timer.hpp>
+
+#include <openssl/ssl.h>
 
 #include <iostream>
 #include <memory>
@@ -10,36 +13,60 @@
 #include <iomanip>
 #include <sstream>
 
+namespace asio = boost::asio;
 using boost::asio::ip::tcp;
+namespace ssl = asio::ssl;
 
 //Сессия для одного клиента
 class Session : public std::enable_shared_from_this<Session> {
 public:
-    Session(tcp::socket socket)
-        : socket_(std::move(socket)),
+    Session(tcp::socket socket, ssl::context &sslContext)
+        : stream_(std::move(socket), sslContext),
           data_(max_length, '\0'),
-          timer_(socket_.get_executor()) {
+          timer_(stream_.get_executor()) {
     }
 
     void start() {
-        auto endpoint = socket_.remote_endpoint();
-        std::cout << "Client connected: " << endpoint.address().to_string()
-                << ":" << endpoint.port() << std::endl;
-
-        start_timeout();
-        do_read();
+        do_handshake();
     }
 
 private:
+    void do_handshake() {
+        auto self = shared_from_this();
+        stream_.async_handshake(
+            ssl::stream_base::server, // ← Мы сервер
+            [this, self](boost::system::error_code ec) {
+                if (!ec) {
+                    std::cout << "[Session] TLS handshake OK\n";
+                    const char *protocol = SSL_get_version(stream_.native_handle());
+                    std::cout << "[Session] Protocol: " << (protocol ? protocol : "unknown") << "\n";
+
+                    // 🔑 Опционально: логирование шифра
+                    const SSL_CIPHER *cipher = SSL_get_current_cipher(stream_.native_handle());
+                    if (cipher) {
+                        std::cout << "[Session] Cipher: " << SSL_CIPHER_get_name(cipher) << "\n";
+                    }
+                    auto endpoint = stream_.lowest_layer().remote_endpoint();
+                    std::cout << "Client connected: " << endpoint.address().to_string()
+                            << ":" << endpoint.port() << std::endl;
+
+                    start_timeout();
+                    do_read();
+                } else {
+                    std::cout << "[Session] Rejected non-TLS client: " << ec.message() << "\n";
+                }
+            });
+    }
+
     void start_timeout() {
-        timer_.expires_after(std::chrono::seconds(2));
+        timer_.expires_after(std::chrono::seconds(10));
         timer_.async_wait(
             [self = shared_from_this()](boost::system::error_code ec) {
-            if (!ec) {
-                std::cout << "[Session] Client timeout, disconnecting\n";
-                self->send_timeout_and_close();
-            }
-        });
+                if (!ec) {
+                    std::cout << "[Session] Client timeout, disconnecting\n";
+                    self->send_timeout_and_close();
+                }
+            });
     }
 
     void cancel_timeout() {
@@ -51,21 +78,16 @@ private:
         std::string timeout_msg = "ERROR: Connection timeout\r\n";
 
         boost::asio::async_write(
-            socket_,
-            boost::asio::buffer(timeout_msg),
-            [self](boost::system::error_code ec, std::size_t /*length*/) {
-                // Завершаем отправку
-                boost::system::error_code shutdown_ec;
-                self->socket_.shutdown(tcp::socket::shutdown_send, shutdown_ec);
-
-                // 🔑 3. Даём сети время на доставку (100 мс достаточно для localhost)
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
+            stream_,
+            asio::buffer(timeout_msg),
+            [self](boost::system::error_code ec, std::size_t length) {
                 // Закрываем окончательно
-                boost::system::error_code close_ec;
-                self->socket_.close(close_ec);
-
-                std::cout << "[Session] Socket closed after timeout message\n";
+                self->stream_.async_shutdown(
+                    [self](boost::system::error_code) {
+                        boost::system::error_code ignored_ec;
+                        self->stream_.lowest_layer().close(ignored_ec);
+                        std::cout << "[Session] Timeout. Secure connection closed\n";
+                    });
             });
     }
 
@@ -82,8 +104,8 @@ private:
     void do_read() {
         auto self = shared_from_this();
 
-        socket_.async_read_some(
-            boost::asio::buffer(data_.data(), max_length),
+        stream_.async_read_some(
+            asio::buffer(data_.data(), max_length),
             [this, self](boost::system::error_code ec, std::size_t length) {
                 if (!ec) {
                     std::cout << "Received: " << length << " bytes" << std::endl;
@@ -123,8 +145,8 @@ private:
         auto self = shared_from_this();
 
         boost::asio::async_write(
-            socket_,
-            boost::asio::buffer(data_.data(), length),
+            stream_,
+            asio::buffer(data_.data(), length),
             [this, self](boost::system::error_code ec, std::size_t length) {
                 if (!ec) {
                     std::cout << "Sent: " << length << " bytes" << std::endl;
@@ -141,8 +163,8 @@ private:
             });
     }
 
-    tcp::socket socket_;
-    boost::asio::steady_timer timer_;
+    ssl::stream<tcp::socket> stream_;
+    asio::steady_timer timer_;
 
     static constexpr std::size_t max_length = 1024;
     std::string data_;
@@ -151,17 +173,37 @@ private:
 // Сервер принимает подключения
 class Server {
 public:
-    Server(boost::asio::io_context &io_context, short port)
-        : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)) {
+    Server(asio::io_context &io_context, short port,
+           const std::string &cert_file, const std::string &key_file)
+        : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)),
+          ssl_context_(ssl::context::tls) {
+        // ← Авто-выбор современной версии
+        configure_ssl_context(cert_file, key_file);
         do_accept();
     }
 
 private:
+    void configure_ssl_context(const std::string &cert_file, const std::string &key_file) {
+        // ✅ Современные безопасные настройки
+        ssl_context_.set_options(
+            ssl::context::default_workarounds |
+            ssl::context::no_compression |
+            ssl::context::single_dh_use);
+
+        // Отключаем устаревшие версии явно (опционально, но полезно для логов)
+        SSL_CTX_set_min_proto_version(ssl_context_.native_handle(), TLS1_2_VERSION);
+
+        ssl_context_.use_certificate_chain_file(cert_file);
+        ssl_context_.use_private_key_file(key_file, ssl::context::pem);
+
+        std::cout << "[Server] SSL context configured with cert & key\n";
+    }
+
     void do_accept() {
         acceptor_.async_accept([this](boost::system::error_code ec, tcp::socket socket) {
             if (!ec) {
                 //Создаём сессию для нового клиента
-                std::make_shared<Session>(std::move(socket))->start();
+                std::make_shared<Session>(std::move(socket), ssl_context_)->start();
 
                 //Принимаем следующего клиента
                 do_accept();
@@ -170,15 +212,20 @@ private:
     }
 
     tcp::acceptor acceptor_;
+    ssl::context ssl_context_;
 };
 
 int main() {
     try {
-        boost::asio::io_context io_context;
+        asio::io_context io_context;
 
-        std::cout << "=== Asio Echo Server Starts ===\n";
-        std::cout << "Listen port 8080\n";
-        Server server(io_context, 8080);
+
+        std::cout << "=== Secure Echo Server Starts ===\n";
+        std::cout << "Listening on port 8443 (TLS 1.2+)...\n";
+        std::string cert_path = "C:/develop/server_lessons/echo_server_asio/certs/server.crt";
+        std::string key_path = "C:/develop/server_lessons/echo_server_asio/certs/server.key";
+
+        Server server(io_context, 8443, cert_path, key_path);
 
         io_context.run();
     } catch (std::exception &e) {
