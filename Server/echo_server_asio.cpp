@@ -14,7 +14,7 @@
 #include <sstream>
 
 namespace asio = boost::asio;
-using boost::asio::ip::tcp;
+using asio::ip::tcp;
 namespace ssl = asio::ssl;
 
 //Сессия для одного клиента
@@ -74,6 +74,8 @@ private:
     }
 
     void send_timeout_and_close() {
+        is_active_ = false;
+
         auto self = shared_from_this();
         std::string timeout_msg = "ERROR: Connection timeout\r\n";
 
@@ -104,9 +106,17 @@ private:
     void do_read() {
         auto self = shared_from_this();
 
+        if (!is_active_) {
+            return;
+        }
+
         stream_.async_read_some(
             asio::buffer(data_.data(), max_length),
             [this, self](boost::system::error_code ec, std::size_t length) {
+                if (!is_active_) {
+                    return;
+                }
+
                 if (!ec) {
                     std::cout << "Received: " << length << " bytes" << std::endl;
 
@@ -122,7 +132,7 @@ private:
                         timeNow();
                     } else if (data_.starts_with("QUIT")) {
                         data_ = "Goodbye!";
-                        do_write(data_.length()); // ✅ Сначала отправляем ответ
+                        do_write(); //
                         return;
                     } else if (data_.starts_with("ECHO ")) {
                         data_.erase(0, 5);
@@ -134,20 +144,30 @@ private:
                     }
 
                     std::cout << data_ << std::endl;
-                    do_write(data_.length());
+                    do_write();
                 } else {
                     std::cout << "Client disconnected" << std::endl;
                 }
             });
     }
 
-    void do_write(std::size_t length) {
+    void do_write() {
+        if (!is_active_) {
+            return;
+        }
+
         auto self = shared_from_this();
 
-        boost::asio::async_write(
+        std::string message = data_ + "\r\n";
+
+        asio::async_write(
             stream_,
-            asio::buffer(data_.data(), length),
+            asio::buffer(message),
             [this, self](boost::system::error_code ec, std::size_t length) {
+                if (!is_active_) {
+                    return;
+                }
+
                 if (!ec) {
                     std::cout << "Sent: " << length << " bytes" << std::endl;
 
@@ -165,6 +185,7 @@ private:
 
     ssl::stream<tcp::socket> stream_;
     asio::steady_timer timer_;
+    bool is_active_ = true;
 
     static constexpr std::size_t max_length = 1024;
     std::string data_;
@@ -184,7 +205,7 @@ public:
 
 private:
     void configure_ssl_context(const std::string &cert_file, const std::string &key_file) {
-        // ✅ Современные безопасные настройки
+        // Безопасные настройки
         ssl_context_.set_options(
             ssl::context::default_workarounds |
             ssl::context::no_compression |
@@ -218,7 +239,6 @@ private:
 int main() {
     try {
         asio::io_context io_context;
-
 
         std::cout << "=== Secure Echo Server Starts ===\n";
         std::cout << "Listening on port 8443 (TLS 1.2+)...\n";

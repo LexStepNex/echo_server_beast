@@ -6,13 +6,5 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(OpenSSL REQUIRED)
 
-add_executable(echo_server_asio echo_server_asio.cpp)
-
-target_link_libraries(echo_server_asio PRIVATE
-        Boost::system
-        OpenSSL::SSL
-        OpenSSL::Crypto
-        ws2_32
-        mswsock
-        crypt32
-)
+add_subdirectory(Server)
+add_subdirectory(Client)
