@@ -1,4 +1,4 @@
-// echo_server_asio.cpp
+// echo_server_beast.cpp
 // Асинхронный Echo Server на Boost.Asio
 
 #include <boost/asio.hpp>
@@ -242,8 +242,8 @@ int main() {
 
         std::cout << "=== Secure Echo Server Starts ===\n";
         std::cout << "Listening on port 8443 (TLS 1.2+)...\n";
-        std::string cert_path = "C:/develop/server_lessons/echo_server_asio/certs/server.crt";
-        std::string key_path = "C:/develop/server_lessons/echo_server_asio/certs/server.key";
+        std::string cert_path = "C:/develop/server_lessons/echo_server_beast/certs/server.crt";
+        std::string key_path = "C:/develop/server_lessons/echo_server_beast/certs/server.key";
 
         Server server(io_context, 8443, cert_path, key_path);
 

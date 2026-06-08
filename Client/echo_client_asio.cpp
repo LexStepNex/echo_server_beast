@@ -235,7 +235,7 @@ int main() {
         asio::io_context io_context;
         std::cout << "=== Secure Echo Client Starts ===\n";
 
-        std::string cert_path = "C:/develop/server_lessons/echo_server_asio/certs/server.crt";
+        std::string cert_path = "C:/develop/server_lessons/echo_server_beast/certs/server.crt";
 
         auto client = std::make_shared<Client>(io_context, HOST, PORT, cert_path);
         client->start();

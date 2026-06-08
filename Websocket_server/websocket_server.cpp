@@ -202,6 +202,11 @@ private:
         if (server_log_.is_open()) {
             server_log_ << '[' << nowTime() << "] " << type << " ";
 
+            if (address.empty() && msg.empty()) {
+                server_log_ << "\n";
+                return;
+            }
+
             if (!address.empty()) {
                 server_log_ << address << (msg.empty() ? "\n" : " ");
             }
@@ -210,6 +215,7 @@ private:
                 server_log_ << (mode_ == Mode::Echo ? "(Echo)" : "(Chat)") << ": \"" << msg << "\""
                         << " (" << msg.size() << " bytes) " << "\n";
             }
+
         }
 
         server_log_.flush();
@@ -262,8 +268,8 @@ int main() {
 
     try {
         asio::io_context io_context;
-        std::string cert = "C:/develop/server_lessons/echo_server_asio/certs/server.crt";
-        std::string key = "C:/develop/server_lessons/echo_server_asio/certs/server.key";
+        std::string cert = "C:/develop/server_lessons/echo_server_beast/certs/server.crt";
+        std::string key = "C:/develop/server_lessons/echo_server_beast/certs/server.key";
 
         std::cout << "=== WSS Router Server ===\n";
         std::cout << "Listening on wss://127.0.0.1:8443\n";
@@ -273,5 +279,6 @@ int main() {
     } catch (std::exception &e) {
         std::cerr << "Exception: " << e.what() << "\n";
     }
+
     return 0;
 }
