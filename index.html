@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>WSS Echo Client</title>
+    <style>
+        body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
+        #chat { height: 300px; border: 1px solid #555; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
+        input { width: 80%; padding: 5px; }
+        button { padding: 5px 10px; cursor: pointer; }
+        .msg { margin: 4px 0; }
+        .sent { color: #4fc1ff; }
+        .recv { color: #ce9178; }
+        .sys { color: #6a9955; font-style: italic; }
+    </style>
+</head>
+<body>
+    <h2>🔐 WebSocket Secure Echo</h2>
+    <div id="chat"></div>
+    <input type="text" id="msg" placeholder="Введите сообщение..." onkeydown="if(event.key==='Enter') send()">
+    <button onclick="send()">Отправить</button>
+    <button onclick="closeWs()">Закрыть</button>
+
+    <script>
+        const ws = new WebSocket('wss://127.0.0.1:8443/chat');
+        const chat = document.getElementById('chat');
+
+        ws.onopen = () => log('sys', '✅ Соединение установлено');
+        ws.onmessage = e => log('recv', e.data);
+        ws.onerror = e => log('sys', '❌ Ошибка соединения');
+        ws.onclose = () => log('sys', '🔌 Соединение закрыто');
+
+        function send() {
+            const input = document.getElementById('msg');
+            if (input.value && ws.readyState === WebSocket.OPEN) {
+                log('sent', input.value);
+                ws.send(input.value);
+                input.value = '';
+            }
+        }
+
+        function closeWs() { ws.close(); }
+        function log(type, text) {
+            chat.innerHTML += `<div class="${type}">${text}</div>`;
+            chat.scrollTop = chat.scrollHeight;
+        }
+    </script>
+</body>
+</html>

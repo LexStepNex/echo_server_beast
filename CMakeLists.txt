@@ -6,5 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(OpenSSL REQUIRED)
 
+if(MINGW)
+    add_compile_options(-Wa,-mbig-obj)
+endif()
+
 add_subdirectory(Server)
 add_subdirectory(Client)
+add_subdirectory(Websocket_server)
