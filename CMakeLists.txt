@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(OpenSSL REQUIRED)
+find_package(nlohmann_json REQUIRED)
 
 if(MINGW)
     add_compile_options(-Wa,-mbig-obj)

@@ -2,48 +2,89 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>WSS Echo Client</title>
+    <title>JSON WebSocket Client</title>
     <style>
-        body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; }
-        #chat { height: 300px; border: 1px solid #555; overflow-y: auto; padding: 10px; margin-bottom: 10px; }
-        input { width: 80%; padding: 5px; }
-        button { padding: 5px 10px; cursor: pointer; }
-        .msg { margin: 4px 0; }
-        .sent { color: #4fc1ff; }
-        .recv { color: #ce9178; }
-        .sys { color: #6a9955; font-style: italic; }
+        body { font-family: monospace; background: #1e1e1e; color: #d4d4d4; padding: 20px; max-width: 800px; margin: 0 auto; }
+        #chat { height: 400px; border: 1px solid #555; overflow-y: auto; padding: 10px; margin-bottom: 10px; background: #252526; }
+        .controls { margin-bottom: 10px; }
+        input, select, button { padding: 8px; margin: 2px; background: #3c3c3c; color: #d4d4d4; border: 1px solid #555; }
+        button { cursor: pointer; background: #0e639c; border-color: #0e639c; }
+        button:hover { background: #1177bb; }
+        .msg { margin: 4px 0; padding: 4px; border-left: 3px solid #555; padding-left: 8px; }
+        .sent { border-color: #4fc1ff; color: #4fc1ff; }
+        .recv { border-color: #ce9178; color: #ce9178; }
+        .sys { border-color: #6a9955; color: #6a9955; font-style: italic; }
+        .err { border-color: #f48771; color: #f48771; }
+        pre { background: #1e1e1e; padding: 5px; margin: 2px 0; }
     </style>
 </head>
 <body>
-    <h2>🔐 WebSocket Secure Echo</h2>
-    <div id="chat"></div>
-    <input type="text" id="msg" placeholder="Введите сообщение..." onkeydown="if(event.key==='Enter') send()">
-    <button onclick="send()">Отправить</button>
-    <button onclick="closeWs()">Закрыть</button>
+<h2>JSON WebSocket Client</h2>
+<div id="chat"></div>
 
-    <script>
-        const ws = new WebSocket('wss://127.0.0.1:8443/chat');
-        const chat = document.getElementById('chat');
+<div class="controls">
+    <select id="type">
+        <option value="echo">echo</option>
+        <option value="chat">chat</option>
+        <option value="time">time</option>
+        <option value="info">info</option>
+        <option value="ping">ping</option>
+        <option value="quit">quit</option>
+    </select>
+    <input type="text" id="payload" placeholder="payload (для echo/chat)" style="width: 300px;">
+    <button onclick="send()">Отправить JSON</button>
+    <button onclick="sendRaw()">Отправить сырую строку</button>
+</div>
 
-        ws.onopen = () => log('sys', '✅ Соединение установлено');
-        ws.onmessage = e => log('recv', e.data);
-        ws.onerror = e => log('sys', '❌ Ошибка соединения');
-        ws.onclose = () => log('sys', '🔌 Соединение закрыто');
+<script>
+    const ws = new WebSocket('wss://127.0.0.1:8443');
+    const chat = document.getElementById('chat');
 
-        function send() {
-            const input = document.getElementById('msg');
-            if (input.value && ws.readyState === WebSocket.OPEN) {
-                log('sent', input.value);
-                ws.send(input.value);
-                input.value = '';
+    ws.onopen = () => log('sys', 'Соединение установлено');
+    ws.onmessage = e => {
+        try {
+            const data = JSON.parse(e.data);
+            if (data.type === 'error') {
+                log('err', `Ошибка [${data.code}]: ${data.message}`);
+            } else {
+                log('recv', `Тип: ${data.type}\n` + JSON.stringify(data, null, 2));
             }
+        } catch (err) {
+            log('recv', e.data);
+        }
+    };
+    ws.onerror = () => log('err', 'Ошибка соединения');
+    ws.onclose = () => log('sys', 'Соединение закрыто');
+
+    function send() {
+        const type = document.getElementById('type').value;
+        const payload = document.getElementById('payload').value;
+
+        const msg = { type: type };
+        if (payload && (type === 'echo' || type === 'chat')) {
+            msg.payload = payload;
         }
 
-        function closeWs() { ws.close(); }
-        function log(type, text) {
-            chat.innerHTML += `<div class="${type}">${text}</div>`;
-            chat.scrollTop = chat.scrollHeight;
+        const jsonStr = JSON.stringify(msg);
+        log('sent', jsonStr);
+        ws.send(jsonStr);
+    }
+
+    function sendRaw() {
+        const raw = prompt('Введите сырую строку (для теста ошибок):');
+        if (raw) {
+            log('sent', `[RAW] ${raw}`);
+            ws.send(raw);
         }
-    </script>
+    }
+
+    function log(type, text) {
+        const div = document.createElement('div');
+        div.className = 'msg ' + type;
+        div.innerHTML = text.replace(/\n/g, '<br>');
+        chat.appendChild(div);
+        chat.scrollTop = chat.scrollHeight;
+    }
+</script>
 </body>
 </html>
