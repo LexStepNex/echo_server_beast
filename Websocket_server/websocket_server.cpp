@@ -22,12 +22,15 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <chrono>
 
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
 #endif
+
+#define DEBUG
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -75,6 +78,8 @@ public:
     //Рассылка всем, включая отправителя
     void broadcast_all(const std::string &message);
 
+    [[nodiscard]] asio::io_context &get_io_context() const;
+
 private:
     void do_accept();
 
@@ -95,7 +100,8 @@ class WsSession : public std::enable_shared_from_this<WsSession> {
 public:
     WsSession(tcp::socket socket, ssl::context &ctx, WsServer &server)
         : websocket_(std::move(socket), ctx),
-          server_(server) {
+          server_(server),
+          last_activity_timer_(asio::steady_timer(server.get_io_context())) {
         server_log_.open(path_server_log_, std::ios::app);
     }
 
@@ -103,10 +109,40 @@ public:
         server_log_.close();
     }
 
-    void start() { do_ssl_handshake(); }
+    void start() {
+        do_ssl_handshake();
+    }
 
     std::string get_username() const {
         return username_;
+    }
+
+    void start_timer() {
+        last_activity_timer_.expires_after(std::chrono::seconds(60));
+
+        last_activity_timer_.async_wait([self = shared_from_this()](boost::system::error_code ec) {
+            if (!ec) {
+                self->check_activity_timer();
+            } else if (ec == asio::error::operation_aborted) {
+                return;
+            } else if (ec) {
+                std::cerr << "User " << self->get_username() << " has " << "timer error: " << ec.message() << "\n";
+            }
+        });
+    }
+
+    void check_activity_timer() {
+        if (std::chrono::steady_clock::now() - last_activity_ >= std::chrono::seconds(60)) {
+            close_connection();
+        } else {
+            start_timer();
+        }
+    }
+
+    void update_activity() {
+        last_activity_ = std::chrono::steady_clock::now();
+        last_activity_timer_.cancel();
+        start_timer();
     }
 
     void send_to_client(const std::string &message) {
@@ -143,7 +179,6 @@ private:
             asio::buffer(message),
             [self, message](boost::system::error_code ec, std::size_t bytes_transferred) {
                 self->is_writing_ = false;
-
                 if (!ec) {
                     self->write_server_log("WRITE MESSAGE", message);
 
@@ -203,6 +238,7 @@ private:
                         self->http_request_,
                         [self](boost::system::error_code ec) {
                             self->on_ws_accept(ec);
+                            self->start_timer();
                         });
                 } else {
                     std::cout << "[WS] Non-WS request. Closing.\n";
@@ -212,7 +248,7 @@ private:
     }
 
     // 3. После Upgrade -> читаем фреймы
-    void on_ws_accept(boost::system::error_code ec) {
+    void on_ws_accept(const boost::system::error_code &ec) {
         if (ec) {
             std::cerr << "[WS] Accept failed: " << ec.message() << "\n";
             return;
@@ -231,7 +267,17 @@ private:
         websocket_.async_read(
             buffer_,
             [self](boost::system::error_code ec, std::size_t /*bytes*/) {
+                if (self->is_closing_) return;
+
                 self->is_reading_ = false;
+                self->update_activity();
+#ifdef DEBUG
+                auto s = std::chrono::duration_cast<std::chrono::seconds>(self->last_activity_.time_since_epoch()).
+                        count();
+
+                std::cout << "[DEBUG] last_activity_ = " << s
+                        << " updated for " << self->username_ << "\n";
+#endif
 
                 if (ec == websocket::error::closed) {
                     std::cout << "[WS] Client disconnected gracefully\n";
@@ -604,7 +650,12 @@ private:
 
     bool is_writing_ = false;
     bool is_reading_ = false;
+    bool is_broadcasting_ = false;
+
     std::deque<std::string> write_queue_;
+
+    std::chrono::time_point<std::chrono::steady_clock> last_activity_ = std::chrono::steady_clock::now();
+    asio::steady_timer last_activity_timer_;
 
     websocket::stream<ssl::stream<tcp::socket> > websocket_;
     beast::flat_buffer buffer_;
@@ -668,7 +719,7 @@ void WsServer::cleanup_dead_unlocked() {
     for (auto it = sessions_map_username.begin(); it != sessions_map_username.end();) {
         if (it->second.expired()) { it = sessions_map_username.erase(it); } else { ++it; }
     }
-};
+}
 
 bool WsServer::is_username_taken(const std::string &username) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
@@ -741,6 +792,10 @@ void WsServer::do_accept() {
 
             do_accept();
         });
+}
+
+asio::io_context &WsServer::get_io_context() const {
+    return io_context_;
 }
 
 int main() {
