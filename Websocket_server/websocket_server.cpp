@@ -30,7 +30,7 @@
 #include <windows.h>
 #endif
 
-#define DEBUG
+//#define DEBUG
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
@@ -255,6 +255,17 @@ private:
         }
         std::cout << "[WS] Client connected (JSON protocol)\n";
 
+        websocket_.control_callback([self = shared_from_this()](websocket::frame_type kind, std::string_view payload) {
+            if (kind == websocket::frame_type::ping) {
+                std::cout << "[WS] Received PING from client\n";
+                self->update_activity();
+            } else if (kind == websocket::frame_type::pong) {
+                std::cout << "[WS] Received PONG from client\n";
+                self->update_activity();
+            } else if (kind == websocket::frame_type::close) {
+                std::cout << "[WS] Close frame received from " << self->username_ << "\n";
+            }
+        });
         server_.add_session(shared_from_this());
 
         do_read();
@@ -268,12 +279,12 @@ private:
             buffer_,
             [self](boost::system::error_code ec, std::size_t /*bytes*/) {
                 if (self->is_closing_) return;
-
                 self->is_reading_ = false;
+
                 self->update_activity();
 #ifdef DEBUG
-                auto s = std::chrono::duration_cast<std::chrono::seconds>(self->last_activity_.time_since_epoch()).
-                        count();
+                auto s = std::chrono::duration_cast<std::chrono::seconds>(
+                    self->last_activity_.time_since_epoch()).count();
 
                 std::cout << "[DEBUG] last_activity_ = " << s
                         << " updated for " << self->username_ << "\n";
