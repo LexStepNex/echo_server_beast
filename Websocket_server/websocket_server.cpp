@@ -101,7 +101,8 @@ public:
     WsSession(tcp::socket socket, ssl::context &ctx, WsServer &server)
         : websocket_(std::move(socket), ctx),
           server_(server),
-          last_activity_timer_(asio::steady_timer(server.get_io_context())) {
+          last_activity_timer_(asio::steady_timer(server.get_io_context())),
+          ping_timer_(asio::steady_timer(server.get_io_context())) {
         server_log_.open(path_server_log_, std::ios::app);
     }
 
@@ -117,7 +118,7 @@ public:
         return username_;
     }
 
-    void start_timer() {
+    void start_activity_timer() {
         last_activity_timer_.expires_after(std::chrono::seconds(60));
 
         last_activity_timer_.async_wait([self = shared_from_this()](boost::system::error_code ec) {
@@ -135,14 +136,54 @@ public:
         if (std::chrono::steady_clock::now() - last_activity_ >= std::chrono::seconds(60)) {
             close_connection();
         } else {
-            start_timer();
+            start_activity_timer();
         }
     }
 
     void update_activity() {
+        missed_pings_ = 0;
         last_activity_ = std::chrono::steady_clock::now();
         last_activity_timer_.cancel();
-        start_timer();
+        start_activity_timer();
+    }
+
+    void start_ping_timer() {
+        if (is_closing_) return;
+
+        ping_timer_.expires_after(std::chrono::seconds(30));
+        ping_timer_.async_wait([self = shared_from_this()](boost::system::error_code ec) {
+            if (!ec) {
+                self->check_ping_timer();
+                std::cout << "[WS] " << self->username_ << " finish ping timer: " << self->missed_pings_ << "\n";
+            } else if (ec == asio::error::operation_aborted) {
+                return;
+            } else if (ec) {
+                std::cerr << "User " << self->get_username() << " has " << "timer error: " << ec.message() << "\n";
+            }
+        });
+    }
+
+    void send_ping() {
+        if (is_closing_) return;
+
+        auto self = shared_from_this();
+        websocket_.async_ping({}, [](boost::system::error_code ec) {
+            if (ec) {
+                std::cerr << "Ping failed: " << ec.message() << "\n";
+            }
+        });
+    }
+
+    void check_ping_timer() {
+        if (is_closing_) return;
+
+        if (missed_pings_ >= 3) {
+            close_connection();
+            return;
+        }
+        send_ping();
+        missed_pings_++;
+        start_ping_timer();
     }
 
     void send_to_client(const std::string &message) {
@@ -238,7 +279,8 @@ private:
                         self->http_request_,
                         [self](boost::system::error_code ec) {
                             self->on_ws_accept(ec);
-                            self->start_timer();
+                            self->start_activity_timer();
+                            self->start_ping_timer();
                         });
                 } else {
                     std::cout << "[WS] Non-WS request. Closing.\n";
@@ -260,10 +302,12 @@ private:
                 std::cout << "[WS] Received PING from client\n";
                 self->update_activity();
             } else if (kind == websocket::frame_type::pong) {
-                std::cout << "[WS] Received PONG from client\n";
+                std::cout << "[WS] Pong from " << self->username_ << "\n";
+                self->missed_pings_ = 0;
                 self->update_activity();
             } else if (kind == websocket::frame_type::close) {
                 std::cout << "[WS] Close frame received from " << self->username_ << "\n";
+                self->close_connection();
             }
         });
         server_.add_session(shared_from_this());
@@ -329,6 +373,9 @@ private:
         if (is_closing_) return;
         is_closing_ = true;
 
+        ping_timer_.cancel();
+        last_activity_timer_.cancel();
+
         auto self = shared_from_this();
         std::string address = self->address_and_port();
 
@@ -345,7 +392,7 @@ private:
 
         boost::system::error_code ignored;
         websocket_.next_layer().lowest_layer().close(ignored);
-        std::cout << "[WS] Connection closed. " << username_ << " left";
+        std::cout << "[WS] Connection closed. " << username_ << " left\n";
 
         self->write_server_log("DISCONNECTING", "", address);
     }
@@ -667,6 +714,9 @@ private:
 
     std::chrono::time_point<std::chrono::steady_clock> last_activity_ = std::chrono::steady_clock::now();
     asio::steady_timer last_activity_timer_;
+
+    unsigned int missed_pings_ = 0;
+    asio::steady_timer ping_timer_;
 
     websocket::stream<ssl::stream<tcp::socket> > websocket_;
     beast::flat_buffer buffer_;
