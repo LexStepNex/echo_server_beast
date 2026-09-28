@@ -448,6 +448,8 @@ private:
             return handle_info();
         } else if (type == "ping") {
             return handle_ping();
+        } else if (type == "heartbeat") {
+            return handle_heartbeat();
         } else if (type == "quit") {
             return handle_quit();
         } else {
@@ -660,6 +662,26 @@ private:
         return response.dump();
     }
 
+    std::string handle_heartbeat() {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = now - last_heartbeat_time_;
+
+        json response;
+        response["type"] = "heartbeat_response";
+
+        if (elapsed < std::chrono::seconds(5)) {
+            response["status"] = "throttled";
+            response["message"] = "Too frequent";
+            return response.dump();
+        }
+
+        last_heartbeat_time_ = now;
+
+        response["timestamp"] = static_cast<long long>(time(nullptr));
+        response["status"] = "ok";
+        return response.dump();
+    }
+
     std::string handle_quit() {
         json response;
         response["type"] = "quit_response";
@@ -717,6 +739,8 @@ private:
 
     unsigned int missed_pings_ = 0;
     asio::steady_timer ping_timer_;
+
+    std::chrono::time_point<std::chrono::steady_clock> last_heartbeat_time_ = std::chrono::steady_clock::now();
 
     websocket::stream<ssl::stream<tcp::socket> > websocket_;
     beast::flat_buffer buffer_;

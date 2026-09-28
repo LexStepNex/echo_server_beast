@@ -367,6 +367,8 @@
     }
 
     function handleMessage(data) {
+        console.log('← Received:', data);
+        
         switch (data.type) {
             case 'login_response':
                 if (data.status === 'ok') {

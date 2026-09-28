@@ -9,3 +9,28 @@ target_link_libraries(websocket_server PRIVATE
         mswsock
         crypt32
 )
+
+target_precompile_headers(websocket_server PRIVATE
+        <boost/asio.hpp>
+        <boost/asio/ssl.hpp>
+        <boost/beast/core.hpp>
+        <boost/beast/websocket.hpp>
+        <boost/beast/http.hpp>
+
+        <algorithm>
+        <chrono>
+        <deque>
+        <fstream>
+        <iomanip>
+        <iostream>
+        <map>
+        <memory>
+        <mutex>
+        <set>
+        <string>
+        <string_view>
+        <thread>
+        <vector>
+
+        <nlohmann/json.hpp>
+)
