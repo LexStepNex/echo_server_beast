@@ -23,6 +23,8 @@
 #include <map>
 #include <algorithm>
 #include <chrono>
+#include <csignal>
+#include <boost/beast/core/stream_traits.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -79,6 +81,12 @@ public:
     void broadcast_all(const std::string &message);
 
     [[nodiscard]] asio::io_context &get_io_context() const;
+
+    void shutdown();
+
+    void stop_accepting();
+
+    void close_all_sessions();
 
 private:
     void do_accept();
@@ -212,6 +220,8 @@ public:
     }
 
 private:
+    friend class WsServer;
+
     void do_write_internal(const std::string &message) {
         auto self = shared_from_this();
         is_writing_ = true;
@@ -369,34 +379,6 @@ private:
     }
 
     // 6. Закрытие соединения
-    void close_connection() {
-        if (is_closing_) return;
-        is_closing_ = true;
-
-        ping_timer_.cancel();
-        last_activity_timer_.cancel();
-
-        auto self = shared_from_this();
-        std::string address = self->address_and_port();
-
-        if (logged_in_ && !username_.empty()) {
-            json system_msg;
-            system_msg["type"] = "system";
-            system_msg["message"] = username_ + " left";
-            server_.broadcast(system_msg.dump(), this);
-
-            write_server_log("USER LEFT", username_);
-        }
-
-        server_.remove_session(self.get());
-
-        boost::system::error_code ignored;
-        websocket_.next_layer().lowest_layer().close(ignored);
-        std::cout << "[WS] Connection closed. " << username_ << " left\n";
-
-        self->write_server_log("DISCONNECTING", "", address);
-    }
-
     std::string process_message(const std::string &raw_msg) {
         json response;
         json request;
@@ -723,6 +705,34 @@ private:
         return endpoint.address().to_string() + ":" + std::to_string(endpoint.port());
     }
 
+    void close_connection() {
+        if (is_closing_) return;
+        is_closing_ = true;
+
+        ping_timer_.cancel();
+        last_activity_timer_.cancel();
+
+        auto self = shared_from_this();
+        std::string address = self->address_and_port();
+
+        if (logged_in_ && !username_.empty()) {
+            json system_msg;
+            system_msg["type"] = "system";
+            system_msg["message"] = username_ + " left";
+            server_.broadcast(system_msg.dump(), this);
+
+            write_server_log("USER LEFT", username_);
+        }
+
+        server_.remove_session(self.get());
+
+        boost::system::error_code ignored;
+        websocket_.next_layer().lowest_layer().close(ignored);
+        std::cout << "[WS] Connection closed. " << username_ << " left\n";
+
+        self->write_server_log("DISCONNECTING", "", address);
+    }
+
     WsServer &server_;
 
     std::string username_;
@@ -883,6 +893,48 @@ asio::io_context &WsServer::get_io_context() const {
     return io_context_;
 }
 
+void WsServer::shutdown() {
+    std::cout << "[Server] Shutting down gracefully...\n";
+
+    stop_accepting();
+
+    json shutdown_message;
+    shutdown_message["type"] = "system";
+    shutdown_message["message"] = "Server is shutting down. Goodbye!";
+    broadcast_all(shutdown_message.dump());
+    auto shutdown_timer = std::make_shared<asio::steady_timer>(io_context_);
+
+    shutdown_timer->expires_after(std::chrono::milliseconds(100));
+    shutdown_timer->async_wait([this, shutdown_timer](auto ec) {
+        if (!ec) {
+            close_all_sessions();
+            io_context_.stop();
+        }
+    });
+}
+
+void WsServer::stop_accepting() {
+    boost::system::error_code ec;
+    acceptor_.close(ec);
+}
+
+void WsServer::close_all_sessions() {
+    std::vector<std::shared_ptr<WsSession> > sessions_copy; {
+        std::lock_guard<std::mutex> lock(sessions_mutex_);
+        for (auto &weak: sessions_) {
+            if (auto session = weak.lock()) {
+                sessions_copy.emplace_back(session);
+            }
+        }
+        sessions_.clear();
+        sessions_map_username.clear();
+    }
+
+    for (auto &session: sessions_copy) {
+        session->close_connection();
+    }
+}
+
 int main() {
 #ifdef WIN32
     SetConsoleOutputCP(CP_UTF8);
@@ -890,14 +942,28 @@ int main() {
 
     try {
         asio::io_context io_context;
+
+        asio::signal_set signals(io_context, SIGINT);
+
         std::string cert = "C:/develop/server_lessons/echo_server_beast/certs/server.crt";
         std::string key = "C:/develop/server_lessons/echo_server_beast/certs/server.key";
 
         std::cout << "=== WSS Router Server ===\n";
         std::cout << "Listening on wss://127.0.0.1:8443\n";
+        std::cout << "Press Ctrl+C to stop\n";
 
         WsServer server(io_context, 8443, cert, key);
+
+        signals.async_wait([&server](auto ec, auto signal_number) {
+            if (!ec) {
+                std::cout << "\n[Server] Received signal " << signal_number << "\n";
+                server.shutdown();
+            }
+        });
+
         io_context.run();
+
+        std::cout << "[Server] Closed gracefully\n";
     } catch (std::exception &e) {
         std::cerr << "Exception: " << e.what() << "\n";
     }
